@@ -46,3 +46,15 @@ The commands **do not compile or flash** the Pixel Watch 2. Inspect the logs in 
 Ubuntu 24.04 initially failed on its unprivileged user-namespace/AppArmor restriction. The parse/dry-run workflow uses Ubuntu 22.04 to avoid changing the host security configuration.
 
 **Important:** A passing `-n` means the planned dependency/task graph was accepted. No module binaries or watch firmware were built or tested yet.
+
+
+## Stage 3: Real kernel modules compilation
+
+- [GitHub Actions → Aurora | compile linux-aurora-modules](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/workflows/aurora-compile-modules.yml)
+- [First compilation attempt, 2026-10-03](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37105380000)
+
+This job runs `bitbake linux-aurora-modules` **for real** on a standard Ubuntu 22.04 runner. It restores the cached `aurora` layer sources, and builds any required toolchain/kernel dependencies, with parallelism 3, an 8 GiB free-space cutoff, and a 70-minute command timeout. **This job does not flash the watch or install software on it.**
+
+Build diagnostics are uploaded in the `aurora-modules-build-logs` artifact even on failure. If compilation completes, generated `linux-aurora-modules*.ipk` packages smaller than 150 MB are uploaded separately as `aurora-modules-ipk-not-flashable`. IPK packages are not boot or flash images. All artifacts are set to expire after 7 days.
+
+**Limitations:** GitHub Actions runners are ephemeral; generated kernel/compiler build work is **not cached** between runs. A failed or timed-out build may need to start over. The previous stage's cached *layer source repositories* are separate from the downloads and toolchain compilation artifacts. A successful build is not proof that any output is safe to flash to a watch.
