@@ -1,0 +1,165 @@
+name: Aurora | compile linux-aurora-modules
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/aurora-compile-modules.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aurora-compile-modules
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 85
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Restore Stage 1 source-layer cache
+        id: layers
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/src
+          key: aurora-whinlatter-layer-sources-v1-${{ runner.os }}
+
+      - name: Validate sources and runner storage
+        run: |
+          set -euo pipefail
+          mkdir -p logs dist
+          if [ "${{ steps.layers.outputs.cache-hit }}" != "true" ]; then
+            echo "::error::Layer cache expired. Re-run aurora-bootstrap.yml to restore sources."
+            exit 1
+          fi
+          test -f asteroid/src/oe-core/oe-init-build-env
+          test -f asteroid/src/meta-smartwatch/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
+          test -d asteroid/src/oe-core/bitbake
+          free -h | tee logs/memory-before.txt
+          df -h . | tee logs/disk-before.txt
+          free_kb="$(df -Pk . | awk 'NR==2 {print $4}')"
+          if [ "$free_kb" -lt 20971520 ]; then
+            echo "::error::Less than 20 GiB available: aborting before any build."
+            exit 1
+          fi
+
+      - name: Install host tools for actual Yocto compilation
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git wget ca-certificates build-essential gawk diffstat chrpath cpio texinfo \
+            zstd lz4 xz-utils unzip file rsync bc bison flex libssl-dev \
+            python3-git python3-jinja2 python3-pexpect python3-pip
+
+      - name: Configure AsteroidOS aurora for bounded parallel build
+        run: |
+          set -eo pipefail
+          git clone --depth 1 --single-branch --branch whinlatter \
+            https://github.com/AsteroidOS/asteroid.git asteroid-entry
+          cp asteroid-entry/prepare-build.sh asteroid/prepare-build.sh
+          cd asteroid
+          set +u
+          source ./prepare-build.sh aurora
+          set -u
+          test "$MACHINE" = "aurora"
+          cat >> conf/local.conf <<'LOCALCONF'
+
+          # GitHub-hosted Standard Linux runner: 4 vCPU, ~15 GiB memory.
+          BB_NUMBER_THREADS = "3"
+          PARALLEL_MAKE = "-j 3"
+          # Stop rather than completely filling the temporary runner disk.
+          BB_DISKMON_DIRS = "HALT,${TMPDIR},8G,1G HALT,${DL_DIR},8G,1G"
+          LOCALCONF
+          cp conf/local.conf "$GITHUB_WORKSPACE/logs/local.conf"
+          cp conf/bblayers.conf "$GITHUB_WORKSPACE/logs/bblayers.conf"
+          echo "MACHINE=$MACHINE"
+          bitbake --version
+
+      - name: Actually build linux-aurora-modules and dependencies
+        id: build
+        run: |
+          set -eo pipefail
+          cd asteroid
+          set +u
+          source ./prepare-build.sh aurora > /dev/null
+          set -u
+
+          # CPU/RAM/disk snapshots are printed throughout the long build.
+          (
+            while sleep 60; do
+              echo "==== Resource snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ) ===="
+              df -h .
+              free -h
+            done
+          ) &
+          monitor_pid="$!"
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+
+          echo "Starting actual build (up to 70 minutes, no watch flashing)"
+          set +e
+          timeout --signal=INT --kill-after=120s 70m \
+            bitbake linux-aurora-modules 2>&1 | tee "$GITHUB_WORKSPACE/logs/build-console.log"
+          rc="${PIPESTATUS[0]}"
+          set -e
+          echo "$rc" > "$GITHUB_WORKSPACE/logs/build-exit-code.txt"
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::Build timed out at 70 min; task logs will be kept."
+          fi
+          exit "$rc"
+
+      - name: Capture recent BitBake task logs and disk report
+        if: always()
+        run: |
+          set -eu
+          mkdir -p logs/task dist
+          {
+            date -u
+            df -h .
+            free -h
+            du -sh asteroid/src asteroid/build 2>/dev/null || true
+            du -sh asteroid/build/downloads asteroid/build/sstate-cache \
+              asteroid/build/tmp 2>/dev/null || true
+          } | tee logs/final.txt
+
+          # Pick recent logs, including task failure logs; keep artifacts bounded.
+          if [ -d asteroid/build/tmp ]; then
+            find asteroid/build/tmp -type f -name 'log.do_*' \
+              -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 25 \
+              | cut -d' ' -f2- | while IFS= read -r log; do
+                name="$(printf '%s' "$log" | sha256sum | cut -c1-12)"
+                tail -n 1500 "$log" > "logs/task/${name}-$(basename "$log").txt" || true
+              done
+          fi
+
+          # A built IPK is useful for future rootfs builds, but is NOT flashable.
+          if [ -d asteroid/build/tmp/deploy/ipk ]; then
+            find asteroid/build/tmp/deploy/ipk -type f \
+              -name '*linux-aurora-modules*.ipk' -size -150M \
+              -exec cp -n '{}' dist/ ';' 2>/dev/null || true
+          fi
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-modules-build-logs
+          path: logs/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload built modules packages, if successful
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-modules-ipk-not-flashable
+          path: dist/*.ipk
+          retention-days: 7
+          if-no-files-found: ignore
