@@ -1,0 +1,147 @@
+name: Aurora | runner check + source preparation
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/aurora-bootstrap.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aurora-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: 1 - Inspect the Ubuntu runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          {
+            echo "=== UTC time ==="
+            date -u
+            echo "=== Operating system ==="
+            uname -a
+            cat /etc/os-release
+            echo "=== CPU ==="
+            nproc
+            lscpu | head -n 25
+            echo "=== RAM ==="
+            free -h
+            echo "=== Disk ==="
+            df -h .
+            echo "=== Git / Python ==="
+            git --version
+            python3 --version
+          } | tee logs/runner.txt
+
+      # Cache ONLY downloaded layer sources (not Yocto build output).
+      # GitHub cache storage is limited and may be evicted.
+      - name: Restore downloaded sources if available
+        uses: actions/cache@v4
+        with:
+          path: asteroid/src
+          key: aurora-whinlatter-layer-sources-v1-${{ runner.os }}
+
+      - name: 2 - Shallow-clone AsteroidOS and prepare the aurora environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p logs asteroid/src
+          exec > >(tee -a "$GITHUB_WORKSPACE/logs/bootstrap.log") 2>&1
+
+          clone_layer() {
+            local destination="$1"
+            local url="$2"
+            local branch="$3"
+            if [ -d "$destination/.git" ]; then
+              echo "[cached] $destination ($(git -C "$destination" rev-parse --short HEAD))"
+              return
+            fi
+            if [ -e "$destination" ]; then
+              # Root source directory exists because of mkdir -p; only empty is safe.
+              if [ -n "$(ls -A "$destination")" ]; then
+                echo "::error::Incomplete checkout at $destination; refusing to reuse it"
+                return 1
+              fi
+              rmdir "$destination"
+            fi
+            local free_kb
+            free_kb="$(df -Pk . | awk 'NR==2 {print $4}')"
+            if [ "$free_kb" -lt 2097152 ]; then
+              echo "::error::Less than 2 GiB disk space left before cloning $destination"
+              return 1
+            fi
+            echo "[clone] $destination ($branch) from $url"
+            git -c advice.detachedHead=false clone --depth 1 --single-branch \
+              --branch "$branch" "$url" "$destination"
+          }
+
+          # The version/branch pairs mirror AsteroidOS/asteroid's
+          # whinlatter prepare-build.sh; meta-qt6 uses HTTPS instead of git://.
+          clone_layer asteroid https://github.com/AsteroidOS/asteroid.git whinlatter
+          clone_layer asteroid/src/oe-core https://github.com/openembedded/openembedded-core.git whinlatter
+          clone_layer asteroid/src/oe-core/bitbake https://github.com/openembedded/bitbake.git 2.16
+          clone_layer asteroid/src/meta-openembedded https://github.com/openembedded/meta-openembedded.git whinlatter
+          clone_layer asteroid/src/meta-qt6 https://code.qt.io/yocto/meta-qt6.git 6.11
+          clone_layer asteroid/src/meta-smartphone https://github.com/shr-distribution/meta-smartphone.git whinlatter
+          clone_layer asteroid/src/meta-clang https://github.com/kraj/meta-clang.git whinlatter
+          clone_layer asteroid/src/meta-asteroid https://github.com/AsteroidOS/meta-asteroid.git master
+          clone_layer asteroid/src/meta-asteroid-community https://github.com/AsteroidOS/meta-asteroid-community.git master
+          clone_layer asteroid/src/meta-smartwatch https://github.com/AsteroidOS/meta-smartwatch.git master
+          clone_layer asteroid/src/meta-virtualization https://git.yoctoproject.org/meta-virtualization whinlatter
+
+          echo "=== Layer revisions ==="
+          for directory in asteroid/src/* asteroid/src/oe-core/bitbake; do
+            if [ -d "$directory/.git" ]; then
+              printf '%s: ' "$directory"
+              git -C "$directory" log -1 --format='%h %cs %s'
+            fi
+          done
+          echo "=== Machine layer compatibility ==="
+          cat asteroid/src/meta-smartwatch/meta-aurora/conf/layer.conf
+
+          echo "=== Prepare the AsteroidOS aurora build configuration ==="
+          cd asteroid
+          # Sources already exist; the official script writes build/conf and
+          # enters OpenEmbedded's shell environment without running a build.
+          source ./prepare-build.sh aurora
+          echo "MACHINE=$MACHINE"
+          echo "Build directory: $PWD"
+          echo "=== Configuration files ==="
+          ls -lh conf/local.conf conf/bblayers.conf
+          echo "=== Free disk space ==="
+          df -h .
+          echo "=== Source directory size ==="
+          du -sh ../src
+
+      - name: Final diagnostics (even if cloning fails)
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "=== Final disk usage ==="
+            df -h .
+            echo "=== Available source trees ==="
+            du -sh asteroid/src/* 2>/dev/null || true
+            echo "=== Build configuration ==="
+            ls -lh asteroid/build/conf 2>/dev/null || true
+          } | tee logs/final.txt
+
+      - name: Upload small diagnostic logs (not downloaded source code)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-bootstrap-logs
+          path: logs/
+          if-no-files-found: warn
+          retention-days: 7
