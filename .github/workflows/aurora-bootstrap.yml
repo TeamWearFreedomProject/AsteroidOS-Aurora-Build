@@ -118,7 +118,11 @@ jobs:
           cd asteroid
           # Sources already exist; the official script writes build/conf and
           # enters OpenEmbedded's shell environment without running a build.
+          # Upstream prepare-build.sh references unset optional shell variables.
+          # Temporarily disable nounset while sourcing the upstream script.
+          set +u
           source ./prepare-build.sh aurora
+          set -u
           echo "MACHINE=$MACHINE"
           echo "Build directory: $PWD"
           echo "=== Configuration files ==="
