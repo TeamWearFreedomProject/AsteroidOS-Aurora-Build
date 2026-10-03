@@ -53,7 +53,7 @@ Ubuntu 24.04 initially failed on its unprivileged user-namespace/AppArmor restri
 - [GitHub Actions → Aurora | compile linux-aurora-modules](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/workflows/aurora-compile-modules.yml)
 - [First compilation attempt, 2026-10-03](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37105380000)
 
-This job runs `bitbake linux-aurora-modules` **for real** on a standard Ubuntu 22.04 runner. It restores the cached `aurora` layer sources, and builds any required toolchain/kernel dependencies, with parallelism 3, an 8 GiB free-space cutoff, and a 70-minute command timeout. **This job does not flash the watch or install software on it.**
+This job runs `bitbake linux-aurora-modules` **for real** on a standard Ubuntu 22.04 runner. It restores the cached `aurora` layer sources, and builds any required toolchain/kernel dependencies, with parallelism 3, an 8 GiB free-space cutoff, a **180-minute command timeout**, and a **200-minute overall job limit**. **This job does not flash the watch or install software on it.**
 
 Build diagnostics are uploaded in the `aurora-modules-build-logs` artifact even on failure. If compilation completes, generated `linux-aurora-modules*.ipk` packages smaller than 150 MB are uploaded separately as `aurora-modules-ipk-not-flashable`. IPK packages are not boot or flash images. All artifacts are set to expire after 7 days.
 
@@ -67,3 +67,7 @@ Build diagnostics are uploaded in the `aurora-modules-build-logs` artifact even 
 Corrected to `HALT,${TMPDIR},8G,100K HALT,${DL_DIR},8G,100K`, retaining disk and inode safety thresholds.
 
 [Retry #37106259719](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37106259719) was launched automatically by that change. The retry's outcome must be verified separately; the fix does not establish that the kernel modules compile successfully.
+
+## Stage 3: extended-time retry
+
+[Extended compilation attempt #37116955017](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37116955017) runs with 180 minutes allotted to BitBake, within a 200-minute GitHub Actions job. The earlier [70-minute build #37106259719](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37106259719) was stopped by the timeout after starting task 880 of 1,103, with approximately 68 GiB of free disk remaining. That count indicates scheduled/started tasks, **not completion percentage**. The longer retry begins from scratch (only the source-layer cache is reused).
