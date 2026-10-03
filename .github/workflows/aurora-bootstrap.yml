@@ -46,6 +46,10 @@ jobs:
 
       # Cache ONLY downloaded layer sources (not Yocto build output).
       # GitHub cache storage is limited and may be evicted.
+      - name: Clone AsteroidOS entrypoint (shallow)
+        shell: bash
+        run: git clone --depth 1 --single-branch --branch whinlatter https://github.com/AsteroidOS/asteroid.git asteroid
+
       - name: Restore downloaded sources if available
         uses: actions/cache@v4
         with:
@@ -56,7 +60,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p logs asteroid/src
+          mkdir -p logs
           exec > >(tee -a "$GITHUB_WORKSPACE/logs/bootstrap.log") 2>&1
 
           clone_layer() {
