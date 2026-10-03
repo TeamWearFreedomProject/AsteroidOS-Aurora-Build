@@ -16,7 +16,7 @@ concurrency:
 jobs:
   compile:
     runs-on: ubuntu-22.04
-    timeout-minutes: 200
+    timeout-minutes: 350
     defaults:
       run:
         shell: bash
@@ -49,6 +49,28 @@ jobs:
             echo "::error::Less than 20 GiB available: aborting before any build."
             exit 1
           fi
+
+      - name: Restore downloaded Yocto sources
+        id: downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/build/downloads
+          key: aurora-whinlatter-downloads-v1-${{ runner.os }}
+
+      - name: Restore latest reusable Yocto sstate cache
+        id: sstate
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/build/sstate-cache
+          key: aurora-whinlatter-sstate-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            aurora-whinlatter-sstate-v1-${{ runner.os }}-
+
+      - name: Report restored Yocto caches
+        run: |
+          echo "Downloaded source cache hit: ${{ steps.downloads.outputs.cache-hit }}"
+          echo "Reused sstate matched key: ${{ steps.sstate.outputs.cache-matched-key }}"
+          du -sh asteroid/build/downloads asteroid/build/sstate-cache 2>/dev/null || true
 
       - name: Install host tools for actual Yocto compilation
         run: |
@@ -104,15 +126,15 @@ jobs:
           monitor_pid="$!"
           trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
 
-          echo "Starting actual build (up to 180 minutes, no watch flashing)"
+          echo "Starting actual build (up to 320 minutes, no watch flashing)"
           set +e
-          timeout --signal=INT --kill-after=120s 180m \
+          timeout --signal=INT --kill-after=120s 320m \
             bitbake linux-aurora-modules 2>&1 | tee "$GITHUB_WORKSPACE/logs/build-console.log"
           rc="${PIPESTATUS[0]}"
           set -e
           echo "$rc" > "$GITHUB_WORKSPACE/logs/build-exit-code.txt"
           if [ "$rc" -eq 124 ]; then
-            echo "::error::Build timed out at 180 min; task logs will be kept."
+            echo "::error::Build timed out at 320 min; task logs will be kept."
           fi
           exit "$rc"
 
@@ -155,6 +177,53 @@ jobs:
           path: logs/
           retention-days: 7
           if-no-files-found: warn
+
+      # The GitHub-hosted runner is ephemeral; never cache build/tmp (19+ GiB).
+      # Saved sstate consists of finished task outputs, not interrupted compile work.
+      - name: Check size of reusable caches after build
+        if: always()
+        id: cache_size
+        run: |
+          set -u
+          echo "downloads_ok=false" >> "$GITHUB_OUTPUT"
+          echo "sstate_ok=false" >> "$GITHUB_OUTPUT"
+          if [ -d asteroid/build/downloads ]; then
+            dl_bytes="$(du -sb asteroid/build/downloads | awk '{print $1}')"
+            echo "Yocto downloads bytes: $dl_bytes"
+            if [ "$dl_bytes" -gt 0 ] && [ "$dl_bytes" -le 6442450944 ]; then
+              echo "downloads_ok=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::Downloads directory empty or exceeds 6 GiB: skip caching."
+            fi
+          fi
+          if [ -d asteroid/build/sstate-cache ]; then
+            ss_bytes="$(du -sb asteroid/build/sstate-cache | awk '{print $1}')"
+            echo "Yocto sstate bytes: $ss_bytes"
+            if [ "$ss_bytes" -gt 0 ] && [ "$ss_bytes" -le 4294967296 ]; then
+              echo "sstate_ok=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::Sstate directory empty or exceeds 4 GiB: skip caching."
+            fi
+          fi
+
+      # Source cache is immutable; save on first run, reuse subsequent runs.
+      - name: Save downloaded Yocto sources (first run only)
+        if: ${{ always() && steps.cache_size.outputs.downloads_ok == 'true' && steps.downloads.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: asteroid/build/downloads
+          key: aurora-whinlatter-downloads-v1-${{ runner.os }}
+
+      # Save a fresh snapshot even when BitBake returns 124 on timeout.
+      # Restore the newest matching prefix during the next attempt.
+      - name: Save reusable Yocto sstate (even after timeouts)
+        if: ${{ always() && steps.cache_size.outputs.sstate_ok == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: asteroid/build/sstate-cache
+          key: aurora-whinlatter-sstate-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload built modules packages, if successful
         if: success()
