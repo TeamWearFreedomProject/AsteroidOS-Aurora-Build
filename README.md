@@ -34,3 +34,15 @@ bitbake -n linux-aurora-modules
 
 The commands **do not compile or flash** the Pixel Watch 2. Inspect the logs in the run's `aurora-bitbake-check-logs` artifact. If the source cache has expired, rerun the Stage 1 workflow first. A green dry run means BitBake can parse metadata and plan tasks; it **does not** demonstrate that the kernel modules compile.
 
+
+
+## Confirmed result (2026-10-03)
+
+- [Ubuntu 22.04 BitBake validation run #37104845098](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37104845098): **success**
+- `bitbake -p`: **success** (BitBake metadata parsing)
+- `bitbake -n linux-aurora-modules`: **success**, 1,103 tasks checked in dry-run mode
+- [Validation logs artifact](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37104845098/artifacts/11267946206) (7-day retention)
+
+Ubuntu 24.04 initially failed on its unprivileged user-namespace/AppArmor restriction. The parse/dry-run workflow uses Ubuntu 22.04 to avoid changing the host security configuration.
+
+**Important:** A passing `-n` means the planned dependency/task graph was accepted. No module binaries or watch firmware were built or tested yet.
