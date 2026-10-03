@@ -53,11 +53,11 @@ Ubuntu 24.04 initially failed on its unprivileged user-namespace/AppArmor restri
 - [GitHub Actions → Aurora | compile linux-aurora-modules](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/workflows/aurora-compile-modules.yml)
 - [First compilation attempt, 2026-10-03](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37105380000)
 
-This job runs `bitbake linux-aurora-modules` **for real** on a standard Ubuntu 22.04 runner. It restores the cached `aurora` layer sources, and builds any required toolchain/kernel dependencies, with parallelism 3, an 8 GiB free-space cutoff, a **180-minute command timeout**, and a **200-minute overall job limit**. **This job does not flash the watch or install software on it.**
+This job runs `bitbake linux-aurora-modules` **for real** on a standard Ubuntu 22.04 runner. It restores the cached `aurora` layer sources, and builds any required toolchain/kernel dependencies, with parallelism 3, an 8 GiB free-space cutoff, a **320-minute command timeout**, and a **350-minute overall job limit**. **This job does not flash the watch or install software on it.**
 
 Build diagnostics are uploaded in the `aurora-modules-build-logs` artifact even on failure. If compilation completes, generated `linux-aurora-modules*.ipk` packages smaller than 150 MB are uploaded separately as `aurora-modules-ipk-not-flashable`. IPK packages are not boot or flash images. All artifacts are set to expire after 7 days.
 
-**Limitations:** GitHub Actions runners are ephemeral; generated kernel/compiler build work is **not cached** between runs. A failed or timed-out build may need to start over. The previous stage's cached *layer source repositories* are separate from the downloads and toolchain compilation artifacts. A successful build is not proof that any output is safe to flash to a watch.
+**Limitations:** GitHub Actions runners are ephemeral. Finished tasks may now be reused through saved Yocto `sstate-cache`, and downloaded sources can be restored between runs. **Interrupted `do_compile` tasks and build/tmp are not preserved**, so long compilations can still restart. Caches may expire, be evicted, exceed size limits, or fail to upload. The previous stage's cached *layer source repositories* are separate from these caches. A successful build is not proof that any output is safe to flash to a watch.
 
 
 ## Stage 3 troubleshooting: disk-monitor inode threshold (2026-10-03)
@@ -71,3 +71,17 @@ Corrected to `HALT,${TMPDIR},8G,100K HALT,${DL_DIR},8G,100K`, retaining disk and
 ## Stage 3: extended-time retry
 
 [Extended compilation attempt #37116955017](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37116955017) runs with 180 minutes allotted to BitBake, within a 200-minute GitHub Actions job. The earlier [70-minute build #37106259719](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37106259719) was stopped by the timeout after starting task 880 of 1,103, with approximately 68 GiB of free disk remaining. That count indicates scheduled/started tasks, **not completion percentage**. The longer retry begins from scratch (only the source-layer cache is reused).
+
+
+## Stage 4: resumable completed tasks through Yocto caches (2026-10-03)
+
+[Cached compilation retry #37127840228](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37127840228) is the **first run that saves completed-task caches**. It restores `asteroid/build/downloads` and the most recent `asteroid/build/sstate-cache` before building. It runs BitBake for up to 320 minutes and reserves up to 30 extra minutes for collecting logs and uploading caches, within GitHub's 6-hour hosted-runner job limit.
+
+- `downloads`: saved under a stable cache key the first time; only reused later, not incrementally updated under the same key. Max size checked: 6 GiB.
+- `sstate-cache`: restored using a shared key prefix and saved under a fresh unique run key **even if BitBake times out**. Max size checked: 4 GiB.
+- `tmp`: intentionally *not* cached (19 GiB at the end of the previous run); **partially running compiler tasks cannot resume from a checkpoint**.
+- Cache save failures are non-fatal; check the `Save ... cache` steps and console logs for actual saved/loaded bytes. Restored-cache matches and task reuse are **not guaranteed**.
+- GitHub's default repository-wide cache limit is 10 GiB. This workflow **does not change repository billing settings or increase that limit**. Older caches may be evicted automatically.
+- The earlier [180-minute retry #37116955017](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37116955017) reached the LLVM/Clang native toolchain dependency and timed out with approximately 63 GiB free disk and 24 GiB in `asteroid/build`. Reached task 1070 of 1103 is a task-start count, **not 97% of build time completed**.
+
+No watch-flashing step is present. Produced IPK packages, if any, are not boot images.
