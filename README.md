@@ -58,3 +58,12 @@ This job runs `bitbake linux-aurora-modules` **for real** on a standard Ubuntu 2
 Build diagnostics are uploaded in the `aurora-modules-build-logs` artifact even on failure. If compilation completes, generated `linux-aurora-modules*.ipk` packages smaller than 150 MB are uploaded separately as `aurora-modules-ipk-not-flashable`. IPK packages are not boot or flash images. All artifacts are set to expire after 7 days.
 
 **Limitations:** GitHub Actions runners are ephemeral; generated kernel/compiler build work is **not cached** between runs. A failed or timed-out build may need to start over. The previous stage's cached *layer source repositories* are separate from the downloads and toolchain compilation artifacts. A successful build is not proof that any output is safe to flash to a watch.
+
+
+## Stage 3 troubleshooting: disk-monitor inode threshold (2026-10-03)
+
+[First compilation attempt #37105380000](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37105380000) stopped **before executing any BitBake tasks**. This was caused by our workflow's `BB_DISKMON_DIRS` value `HALT,${TMPDIR},8G,1G`: the second threshold specifies **free inode count**, so `1G` meant one billion available inodes, not an additional 1 GiB of storage. The runner still had approximately 86 GiB free and ample memory.
+
+Corrected to `HALT,${TMPDIR},8G,100K HALT,${DL_DIR},8G,100K`, retaining disk and inode safety thresholds.
+
+[Retry #37106259719](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37106259719) was launched automatically by that change. The retry's outcome must be verified separately; the fix does not establish that the kernel modules compile successfully.
