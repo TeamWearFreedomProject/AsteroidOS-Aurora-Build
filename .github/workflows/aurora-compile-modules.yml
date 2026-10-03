@@ -75,8 +75,9 @@ jobs:
           # GitHub-hosted Standard Linux runner: 4 vCPU, ~15 GiB memory.
           BB_NUMBER_THREADS = "3"
           PARALLEL_MAKE = "-j 3"
+          # Guard both disk bytes and available inodes; latter is a count, not GiB.
           # Stop rather than completely filling the temporary runner disk.
-          BB_DISKMON_DIRS = "HALT,${TMPDIR},8G,1G HALT,${DL_DIR},8G,1G"
+          BB_DISKMON_DIRS = "HALT,${TMPDIR},8G,100K HALT,${DL_DIR},8G,100K"
           LOCALCONF
           cp conf/local.conf "$GITHUB_WORKSPACE/logs/local.conf"
           cp conf/bblayers.conf "$GITHUB_WORKSPACE/logs/bblayers.conf"
