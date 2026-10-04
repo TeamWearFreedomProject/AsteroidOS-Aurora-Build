@@ -105,3 +105,17 @@ The modules recipe and all upstream repositories remain unchanged. GitHub source
 - Uploads logs even after failure, and attempts to save reusable downloads/sstate caches after the build. If images are generated, files meeting the workflow's size/type selection are uploaded as **UNVERIFIED / DO NOT FLASH** artifacts for offline inspection. Image availability and boot compatibility are not established by a passing CI result.
 - This stage only builds on a GitHub-hosted Linux runner. It never connects to, unlocks, erases, or flashes the Pixel Watch 2.
 - Goal was to make as much verified build progress as possible before 21:00 JST. Completion by that time is not assured. Check each linked run for its actual conclusion before reporting success.
+
+
+## Stage 7: disk-conscious asteroid-image retry (2026-10-04)
+
+Previous image attempt [#37175644037](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37175644037) halted at ~8 GiB disk free; its dry run had 8,225 planned tasks and the real build had started 3,107 tasks. The build workspace occupied ~78 GiB, including ~70 GiB under `tmp`, with no individual compile task failure reported before BitBake's space guard stopped the run. Download and sstate caches were saved.
+
+[Disk-conscious retry #37196499695](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37196499695) changes only this repository's GitHub Actions workflow:
+
+- Opt in to the official Yocto `rm_work` class via `INHERIT += "rm_work"`, which discards per-recipe temporary work after packaging rather than indiscriminately deleting active workdirs. It does not delete source downloads, shared-state caches, feeds, or deployed images.
+- Remove only explicitly allowlisted, unused preinstalled development SDKs from the **ephemeral CI runner** before compiling. This does **not** touch a phone/watch or any personal machine.
+- If GitHub evicts the relatively small source-layer cache (observed in the first [retry #37196453420](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37196453420)), shallow-clone the missing official Yocto layers instead of failing immediately. The GitHub Actions cache limit means eviction may recur.
+- Keep the disk/inode HALT guard in place. Diagnostic logs and available cache snapshots are still saved on normal build failures. No device flash commands are present.
+
+**Unverified:** `rm_work` can reduce disk demand but is not a guarantee that this 8,225-task image fits a standard hosted runner, or that all aurora recipes work with it. Always inspect the run logs and artifacts before claiming an image exists.
