@@ -1,7 +1,7 @@
 diff --git a/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb b/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
 --- a/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
 +++ b/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
-@@ -371,7 +371,15 @@ do_compile() {
+@@ -371,8 +371,15 @@ do_compile() {
      # under the wlan trees to -I. This is huge but cc-o-c-respfile.patch routes
      # $(c_flags) through an @response-file so it no longer overflows the cc
      # command. Computed at build time.
