@@ -50,6 +50,24 @@ jobs:
             exit 1
           fi
 
+      - name: Reclaim unused software from this ephemeral GitHub runner
+        run: |
+          set -euo pipefail
+          echo "Before optional runner cleanup:"
+          df -h .
+          # Strict allowlist: installed Android SDK, .NET, PowerShell, Swift
+          # and GHC; Yocto builds its own toolchain. Never delete workspace,
+          # Yocto downloads/sstate, /usr/bin tools, or any device data.
+          for dir in /usr/local/lib/android /usr/share/dotnet /usr/local/share/powershell /usr/share/swift /opt/ghc /usr/local/.ghcup; do
+            if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+              du -sh "$dir" 2>/dev/null || true
+              sudo rm -rf -- "$dir"
+              echo "Removed runner-only SDK: $dir"
+            fi
+          done
+          echo "After optional runner cleanup:"
+          df -h . | tee logs/disk-after-runner-cleanup.txt
+
       - name: Restore downloaded Yocto sources
         id: downloads
         uses: actions/cache/restore@v4
@@ -110,10 +128,14 @@ jobs:
           # GitHub-hosted Standard Linux runner: 4 vCPU, ~15 GiB memory.
           BB_NUMBER_THREADS = "3"
           PARALLEL_MAKE = "-j 3"
+          # Release per-recipe scratch work after it has been packaged.
+          # Leave DL_DIR, SSTATE_DIR, package feeds and deploy outputs alone.
+          INHERIT += "rm_work"
           # Guard both disk bytes and available inodes; latter is a count, not GiB.
           # Stop rather than completely filling the temporary runner disk.
           BB_DISKMON_DIRS = "HALT,${TMPDIR},8G,100K HALT,${DL_DIR},8G,100K"
           LOCALCONF
+          grep -F 'INHERIT += "rm_work"' conf/local.conf
           cp conf/local.conf "$GITHUB_WORKSPACE/logs/local.conf"
           cp conf/bblayers.conf "$GITHUB_WORKSPACE/logs/bblayers.conf"
           echo "MACHINE=$MACHINE"
@@ -129,6 +151,8 @@ jobs:
           set -u
 
           # CPU/RAM/disk snapshots are printed throughout the long build.
+          # Yocto rm_work deletes finished recipes' scratch directories.
+          # Do NOT delete workdirs manually while BitBake is running.
           (
             while sleep 60; do
               echo "==== Resource snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ) ===="
