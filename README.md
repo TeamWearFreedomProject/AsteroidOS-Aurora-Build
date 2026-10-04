@@ -96,3 +96,12 @@ Stage 4 completed the `linux-aurora` kernel's `do_compile` and kernel module tas
 The test patch [`patches/0001-aurora-qcacld-short-wlan-include-paths.patch`](patches/0001-aurora-qcacld-short-wlan-include-paths.patch) changes only the copied `meta-smartwatch` recipe inside the ephemeral build runner. It creates a short `/tmp/w` symlink to the Qualcomm WLAN source tree and generates the many `-I` include flags with that short prefix instead of repeating the long Yocto workdir. The workflow checks the patch applies before beginning the expensive build. **This is a targeted hypothesis, not a proven fix; check CI logs for the outcome.**
 
 The modules recipe and all upstream repositories remain unchanged. GitHub source/download and completed-task sstate caches are restored before the build and the sstate is saved again when the build exits (subject to cache limits). No device is connected or flashed. A compiled IPK is not a flashable firmware image.
+
+
+## Stage 6: survey and build AsteroidOS userspace/rootfs (2026-10-04)
+
+- [Read-only dependency survey](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37175545717): runs `bitbake -p` then `bitbake -n asteroid-image` on Ubuntu 22.04; this does not compile software.
+- [Full asteroid-image build](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37175644037): restores source-layer, download and finished-task sstate caches from the successful modules build, applies only the local qcacld short-path patch, and runs `bitbake asteroid-image` with 320-minute command and 350-minute job limits.
+- Uploads logs even after failure, and attempts to save reusable downloads/sstate caches after the build. If images are generated, files meeting the workflow's size/type selection are uploaded as **UNVERIFIED / DO NOT FLASH** artifacts for offline inspection. Image availability and boot compatibility are not established by a passing CI result.
+- This stage only builds on a GitHub-hosted Linux runner. It never connects to, unlocks, erases, or flashes the Pixel Watch 2.
+- Goal was to make as much verified build progress as possible before 21:00 JST. Completion by that time is not assured. Check each linked run for its actual conclusion before reporting success.
