@@ -1,0 +1,252 @@
+name: Aurora | build asteroid-image (rootfs)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/aurora-image-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aurora-image-build
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Restore Stage 1 source-layer cache
+        id: layers
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/src
+          key: aurora-whinlatter-layer-sources-v1-${{ runner.os }}
+
+      - name: Validate sources and runner storage
+        run: |
+          set -euo pipefail
+          mkdir -p logs dist
+          if [ "${{ steps.layers.outputs.cache-hit }}" != "true" ]; then
+            echo "::error::Layer cache expired. Re-run aurora-bootstrap.yml to restore sources."
+            exit 1
+          fi
+          test -f asteroid/src/oe-core/oe-init-build-env
+          test -f asteroid/src/meta-smartwatch/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
+          test -d asteroid/src/oe-core/bitbake
+          free -h | tee logs/memory-before.txt
+          df -h . | tee logs/disk-before.txt
+          free_kb="$(df -Pk . | awk 'NR==2 {print $4}')"
+          if [ "$free_kb" -lt 20971520 ]; then
+            echo "::error::Less than 20 GiB available: aborting before any build."
+            exit 1
+          fi
+
+      - name: Restore downloaded Yocto sources
+        id: downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/build/downloads
+          key: aurora-image-downloads-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            aurora-image-downloads-v1-${{ runner.os }}-
+            aurora-whinlatter-downloads-v1-${{ runner.os }}
+
+      - name: Restore latest reusable Yocto sstate cache
+        id: sstate
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/build/sstate-cache
+          key: aurora-whinlatter-sstate-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            aurora-whinlatter-sstate-v1-${{ runner.os }}-
+
+      - name: Report restored Yocto caches
+        run: |
+          echo "Downloaded source cache hit: ${{ steps.downloads.outputs.cache-hit }}"
+          echo "Reused sstate matched key: ${{ steps.sstate.outputs.cache-matched-key }}"
+          du -sh asteroid/build/downloads asteroid/build/sstate-cache 2>/dev/null || true
+
+      - name: Install host tools for actual Yocto compilation
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git wget ca-certificates build-essential gawk diffstat chrpath cpio texinfo \
+            zstd lz4 xz-utils unzip file rsync bc bison flex libssl-dev \
+            python3-git python3-jinja2 python3-pexpect python3-pip
+
+      - name: Configure AsteroidOS aurora for bounded parallel build
+        run: |
+          set -eo pipefail
+          git clone --depth 1 --single-branch --branch whinlatter \
+            https://github.com/AsteroidOS/asteroid.git asteroid-entry
+          cp asteroid-entry/prepare-build.sh asteroid/prepare-build.sh
+
+          # Patch only this runner's copied layer (never push to upstream).
+          # Shorten repeated Wi-Fi -I prefixes to avoid E2BIG in qcacld.
+          git -C asteroid/src/meta-smartwatch apply --check \
+            "$GITHUB_WORKSPACE/patches/0001-aurora-qcacld-short-wlan-include-paths.patch"
+          git -C asteroid/src/meta-smartwatch apply \
+            "$GITHUB_WORKSPACE/patches/0001-aurora-qcacld-short-wlan-include-paths.patch"
+          grep -nF 'WL=/tmp/w' \
+            asteroid/src/meta-smartwatch/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb \
+            | tee logs/aurora-qcacld-patch.txt
+          cd asteroid
+          set +u
+          source ./prepare-build.sh aurora
+          set -u
+          test "$MACHINE" = "aurora"
+          cat >> conf/local.conf <<'LOCALCONF'
+
+          # GitHub-hosted Standard Linux runner: 4 vCPU, ~15 GiB memory.
+          BB_NUMBER_THREADS = "3"
+          PARALLEL_MAKE = "-j 3"
+          # Guard both disk bytes and available inodes; latter is a count, not GiB.
+          # Stop rather than completely filling the temporary runner disk.
+          BB_DISKMON_DIRS = "HALT,${TMPDIR},8G,100K HALT,${DL_DIR},8G,100K"
+          LOCALCONF
+          cp conf/local.conf "$GITHUB_WORKSPACE/logs/local.conf"
+          cp conf/bblayers.conf "$GITHUB_WORKSPACE/logs/bblayers.conf"
+          echo "MACHINE=$MACHINE"
+          bitbake --version
+
+      - name: Actually build asteroid-image and dependencies
+        id: build
+        run: |
+          set -eo pipefail
+          cd asteroid
+          set +u
+          source ./prepare-build.sh aurora > /dev/null
+          set -u
+
+          # CPU/RAM/disk snapshots are printed throughout the long build.
+          (
+            while sleep 60; do
+              echo "==== Resource snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ) ===="
+              df -h .
+              free -h
+            done
+          ) &
+          monitor_pid="$!"
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+
+          echo "Starting asteroid-image build (up to 320 minutes, NO flashing)"
+          set +e
+          timeout --signal=INT --kill-after=120s 320m \
+            bitbake asteroid-image 2>&1 | tee "$GITHUB_WORKSPACE/logs/build-console.log"
+          rc="${PIPESTATUS[0]}"
+          set -e
+          echo "$rc" > "$GITHUB_WORKSPACE/logs/build-exit-code.txt"
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::Build timed out at 320 min; task logs will be kept."
+          fi
+          exit "$rc"
+
+      - name: Capture recent BitBake task logs and disk report
+        if: always()
+        run: |
+          set -eu
+          mkdir -p logs/task dist
+          {
+            date -u
+            df -h .
+            free -h
+            du -sh asteroid/src asteroid/build 2>/dev/null || true
+            du -sh asteroid/build/downloads asteroid/build/sstate-cache \
+              asteroid/build/tmp 2>/dev/null || true
+          } | tee logs/final.txt
+
+          # Pick recent logs, including task failure logs; keep artifacts bounded.
+          if [ -d asteroid/build/tmp ]; then
+            find asteroid/build/tmp -type f -name 'log.do_*' \
+              -printf '%T@ %p\n' 2>/dev/null | sort -nr | sed -n '1,25p' \
+              | cut -d' ' -f2- | while IFS= read -r log; do
+                name="$(printf '%s' "$log" | sha256sum | cut -c1-12)"
+                tail -n 1500 "$log" > "logs/task/${name}-$(basename "$log").txt" || true
+              done
+          fi
+
+          # Image outputs are not validated and must NOT be flashed.
+          image_dir=asteroid/build/tmp/deploy/images/aurora
+          if [ -d "$image_dir" ]; then
+            find "$image_dir" -maxdepth 1 -type f -printf '%f %s bytes\n' \
+              | sort | tee logs/image-files.txt
+            find "$image_dir" -maxdepth 1 -type f \
+              \( -name 'asteroid-image-*.ext4' -o -name 'asteroid-image-*.simg' \
+                 -o -name 'asteroid-image-*.tar.*' -o -name 'asteroid-image-*.manifest' \) \
+              -size -1400M -exec cp -n -t dist/ '{}' '+' 2>/dev/null || true
+          fi
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-image-build-logs
+          path: logs/
+          retention-days: 7
+          if-no-files-found: warn
+
+      # The GitHub-hosted runner is ephemeral; never cache build/tmp (19+ GiB).
+      # Saved sstate consists of finished task outputs, not interrupted compile work.
+      - name: Check size of reusable caches after build
+        if: always()
+        id: cache_size
+        run: |
+          set -u
+          echo "downloads_ok=false" >> "$GITHUB_OUTPUT"
+          echo "sstate_ok=false" >> "$GITHUB_OUTPUT"
+          if [ -d asteroid/build/downloads ]; then
+            dl_bytes="$(du -sb asteroid/build/downloads | awk '{print $1}')"
+            echo "Yocto downloads bytes: $dl_bytes"
+            if [ "$dl_bytes" -gt 0 ] && [ "$dl_bytes" -le 6442450944 ]; then
+              echo "downloads_ok=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::Downloads directory empty or exceeds 6 GiB: skip caching."
+            fi
+          fi
+          if [ -d asteroid/build/sstate-cache ]; then
+            ss_bytes="$(du -sb asteroid/build/sstate-cache | awk '{print $1}')"
+            echo "Yocto sstate bytes: $ss_bytes"
+            if [ "$ss_bytes" -gt 0 ] && [ "$ss_bytes" -le 4294967296 ]; then
+              echo "sstate_ok=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::Sstate directory empty or exceeds 4 GiB: skip caching."
+            fi
+          fi
+
+      # Source cache is immutable; save on first run, reuse subsequent runs.
+      - name: Save updated image downloads for retries
+        if: ${{ always() && steps.cache_size.outputs.downloads_ok == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: asteroid/build/downloads
+          key: aurora-image-downloads-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Save a fresh snapshot even when BitBake returns 124 on timeout.
+      # Restore the newest matching prefix during the next attempt.
+      - name: Save reusable Yocto sstate (even after timeouts)
+        if: ${{ always() && steps.cache_size.outputs.sstate_ok == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: asteroid/build/sstate-cache
+          key: aurora-whinlatter-sstate-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload built image file candidates, if successful
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-image-build-unverified-do-not-flash
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: ignore
