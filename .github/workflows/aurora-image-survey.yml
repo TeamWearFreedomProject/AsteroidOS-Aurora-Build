@@ -1,0 +1,117 @@
+name: Aurora | asteroid-image task survey
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/aurora-image-survey.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aurora-image-survey
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Restore cached whinlatter layers
+        id: layers
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/src
+          key: aurora-whinlatter-layer-sources-v1-${{ runner.os }}
+
+      - name: Check saved source layers
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          if [ "${{ steps.layers.outputs.cache-hit }}" != "true" ]; then
+            echo "::error::Source cache unavailable. Run aurora-bootstrap.yml again to re-create it."
+            exit 1
+          fi
+          test -f asteroid/src/oe-core/oe-init-build-env
+          test -f asteroid/src/meta-smartwatch/meta-aurora/conf/machine/aurora.conf
+          test -d asteroid/src/oe-core/bitbake
+          df -h . | tee logs/disk-before.txt
+          echo "Restored AsteroidOS layers:"
+          du -sh asteroid/src/* | tee logs/layer-sizes.txt
+
+      - name: Install minimum host packages for Yocto metadata parsing
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            gawk diffstat chrpath cpio texinfo zstd lz4 python3-git python3-jinja2
+
+      - name: Generate Aurora BitBake configuration
+        run: |
+          set -eo pipefail
+          # Don't re-clone: reuse the cached sources for fast startup.
+          git clone --depth 1 --single-branch --branch whinlatter \
+            https://github.com/AsteroidOS/asteroid.git asteroid-entry
+          # Official script expects its layers under the current source root.
+          # Copy only the entrypoint scripts, not the large layer directories.
+          cp asteroid-entry/prepare-build.sh asteroid/prepare-build.sh
+          cd asteroid
+          # Upstream script reads optional shell variables without checking if set.
+          set +u
+          source ./prepare-build.sh aurora
+          set -u
+          echo "MACHINE=$MACHINE"
+          test "$MACHINE" = aurora
+          test -f conf/local.conf
+          test -f conf/bblayers.conf
+          cp conf/local.conf "$GITHUB_WORKSPACE/logs/local.conf"
+          cp conf/bblayers.conf "$GITHUB_WORKSPACE/logs/bblayers.conf"
+          echo "=== BitBake version ==="
+          bitbake --version
+
+      - name: Parse all BitBake metadata (no compilation)
+        id: parse
+        run: |
+          set -eo pipefail
+          cd asteroid
+          # Avoid repeated layer downloads by using the restored source tree.
+          set +u
+          source ./prepare-build.sh aurora > /dev/null
+          set -u
+          bitbake -p 2>&1 | tee "$GITHUB_WORKSPACE/logs/parse.log"
+
+      - name: Survey asteroid-image dependency graph (no compilation)
+        id: dryrun
+        if: steps.parse.outcome == 'success'
+        run: |
+          set -eo pipefail
+          cd asteroid
+          set +u
+          source ./prepare-build.sh aurora > /dev/null
+          set -u
+          bitbake -n asteroid-image 2>&1 | tee "$GITHUB_WORKSPACE/logs/image-dryrun.log"
+
+      - name: Final disk and build metadata summary
+        if: always()
+        run: |
+          mkdir -p logs
+          {
+            date -u
+            df -h .
+            du -sh asteroid/src asteroid/build 2>/dev/null || true
+          } | tee logs/final.txt
+
+      - name: Upload parse and dry-run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-image-survey-logs
+          path: logs/
+          if-no-files-found: warn
+          retention-days: 7
