@@ -87,6 +87,16 @@ jobs:
           git clone --depth 1 --single-branch --branch whinlatter \
             https://github.com/AsteroidOS/asteroid.git asteroid-entry
           cp asteroid-entry/prepare-build.sh asteroid/prepare-build.sh
+
+          # Patch only this runner's copied layer (never push to upstream).
+          # Shorten repeated Wi-Fi -I prefixes to avoid E2BIG in qcacld.
+          git -C asteroid/src/meta-smartwatch apply --check \
+            "$GITHUB_WORKSPACE/patches/0001-aurora-qcacld-short-wlan-include-paths.patch"
+          git -C asteroid/src/meta-smartwatch apply \
+            "$GITHUB_WORKSPACE/patches/0001-aurora-qcacld-short-wlan-include-paths.patch"
+          grep -nF 'WL=/tmp/w' \
+            asteroid/src/meta-smartwatch/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb \
+            | tee logs/aurora-qcacld-patch.txt
           cd asteroid
           set +u
           source ./prepare-build.sh aurora
