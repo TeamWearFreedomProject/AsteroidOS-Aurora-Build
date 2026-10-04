@@ -31,14 +31,46 @@ jobs:
           path: asteroid/src
           key: aurora-whinlatter-layer-sources-v1-${{ runner.os }}
 
+      # The source cache can be evicted when large Yocto caches fill the
+      # repository quota. Rebuild just the shallow layer checkouts on a miss.
+      # Never erase or overwrite an existing checkout.
+      - name: Restore missing source-layer checkouts (cache fallback)
+        if: ${{ steps.layers.outputs.cache-hit != 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p asteroid/src/oe-core
+          clone_layer() {
+            local dest="$1" url="$2" branch="$3"
+            if [ -d "$dest/.git" ]; then
+              echo "Already present: $dest"
+              return 0
+            fi
+            if [ -e "$dest" ]; then
+              if [ -n "$(ls -A "$dest")" ]; then
+                echo "::error::Nonempty unexpected layer directory: $dest"
+                return 1
+              fi
+              rmdir "$dest"
+            fi
+            echo "Cloning $dest at $branch"
+            git clone --depth 1 --single-branch --branch "$branch" "$url" "$dest"
+          }
+          clone_layer asteroid/src/oe-core https://github.com/openembedded/openembedded-core.git whinlatter
+          clone_layer asteroid/src/oe-core/bitbake https://github.com/openembedded/bitbake.git 2.16
+          clone_layer asteroid/src/meta-openembedded https://github.com/openembedded/meta-openembedded.git whinlatter
+          clone_layer asteroid/src/meta-qt6 https://code.qt.io/yocto/meta-qt6.git 6.11
+          clone_layer asteroid/src/meta-smartphone https://github.com/shr-distribution/meta-smartphone.git whinlatter
+          clone_layer asteroid/src/meta-clang https://github.com/kraj/meta-clang.git whinlatter
+          clone_layer asteroid/src/meta-asteroid https://github.com/AsteroidOS/meta-asteroid.git master
+          clone_layer asteroid/src/meta-asteroid-community https://github.com/AsteroidOS/meta-asteroid-community.git master
+          clone_layer asteroid/src/meta-smartwatch https://github.com/AsteroidOS/meta-smartwatch.git master
+          clone_layer asteroid/src/meta-virtualization https://git.yoctoproject.org/meta-virtualization whinlatter
+          du -sh asteroid/src | tee logs/source-reclone-size.txt
+
       - name: Validate sources and runner storage
         run: |
           set -euo pipefail
           mkdir -p logs dist
-          if [ "${{ steps.layers.outputs.cache-hit }}" != "true" ]; then
-            echo "::error::Layer cache expired. Re-run aurora-bootstrap.yml to restore sources."
-            exit 1
-          fi
           test -f asteroid/src/oe-core/oe-init-build-env
           test -f asteroid/src/meta-smartwatch/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
           test -d asteroid/src/oe-core/bitbake
