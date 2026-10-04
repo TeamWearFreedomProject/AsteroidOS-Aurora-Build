@@ -38,7 +38,7 @@ jobs:
         if: ${{ steps.layers.outputs.cache-hit != 'true' }}
         run: |
           set -euo pipefail
-          mkdir -p asteroid/src/oe-core
+          mkdir -p logs asteroid/src/oe-core
           clone_layer() {
             local dest="$1" url="$2" branch="$3"
             if [ -d "$dest/.git" ]; then
