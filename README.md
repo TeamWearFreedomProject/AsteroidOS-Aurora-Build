@@ -85,3 +85,14 @@ Corrected to `HALT,${TMPDIR},8G,100K HALT,${DL_DIR},8G,100K`, retaining disk and
 - The earlier [180-minute retry #37116955017](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37116955017) reached the LLVM/Clang native toolchain dependency and timed out with approximately 63 GiB free disk and 24 GiB in `asteroid/build`. Reached task 1070 of 1103 is a task-start count, **not 97% of build time completed**.
 
 No watch-flashing step is present. Produced IPK packages, if any, are not boot images.
+
+
+## Stage 5: qcacld Wi-Fi command-length workaround (2026-10-04)
+
+[Attempt #37165576772](https://github.com/TeamWearFreedomProject/AsteroidOS-Aurora-Build/actions/runs/37165576772) is an experimental retry with the Yocto download and sstate caches from Stage 4.
+
+Stage 4 completed the `linux-aurora` kernel's `do_compile` and kernel module tasks, but `linux-aurora-modules:do_compile` failed while compiling `qcacld-3.0/core/hdd/src/wlan_hdd_assoc.o` with `/bin/sh: Argument list too long` (exit 127 from make's subcommand). The upstream kernel already has a compiler response-file patch; that was not sufficient for the outer Kbuild shell invocation.
+
+The test patch [`patches/0001-aurora-qcacld-short-wlan-include-paths.patch`](patches/0001-aurora-qcacld-short-wlan-include-paths.patch) changes only the copied `meta-smartwatch` recipe inside the ephemeral build runner. It creates a short `/tmp/w` symlink to the Qualcomm WLAN source tree and generates the many `-I` include flags with that short prefix instead of repeating the long Yocto workdir. The workflow checks the patch applies before beginning the expensive build. **This is a targeted hypothesis, not a proven fix; check CI logs for the outcome.**
+
+The modules recipe and all upstream repositories remain unchanged. GitHub source/download and completed-task sstate caches are restored before the build and the sstate is saved again when the build exits (subject to cache limits). No device is connected or flashed. A compiled IPK is not a flashable firmware image.
