@@ -1,0 +1,20 @@
+diff --git a/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb b/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
+--- a/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
++++ b/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
+@@ -371,7 +371,15 @@ do_compile() {
+     # under the wlan trees to -I. This is huge but cc-o-c-respfile.patch routes
+     # $(c_flags) through an @response-file so it no longer overflows the cc
+     # command. Computed at build time.
+-    WL=${S}/private/msm-google-modules/wlan
++    # The outer Kbuild shell still hits Linux's per-argument 128KiB limit in
++    # qcacld (wlan_hdd_assoc.o), despite the compiler response-file patch.
++    # Every header directory is passed through KCFLAGS: use one short, stable
++    # symlink as the -I prefix rather than repeating the long Yocto WORKDIR.
++    # The link is created only in the isolated GitHub Actions runner.
++    ln -sfn "${S}/private/msm-google-modules/wlan" /tmp/w
++    WL=/tmp/w
+     WINC=$(for d in "$WL/qca-wifi-host-cmn" "$WL/qcacld-3.0" "$WL/fw-api" "$WL/platform/inc"; do \
+             find "$d" -name '*.h' -printf '%h\n' 2>/dev/null; done | sort -u | sed 's/^/-I/' | tr '\n' ' ')
++    bbnote "Short WLAN include flags length: $(printf '%s' "$WINC" | wc -c) bytes"
+ 
+     extra=""
