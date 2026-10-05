@@ -1,0 +1,70 @@
+diff --git a/meta-aurora/recipes-bsp/aurora-boot-images/files/aurora-vkb-assemble.py b/meta-aurora/recipes-bsp/aurora-boot-images/files/aurora-vkb-assemble.py
+--- a/meta-aurora/recipes-bsp/aurora-boot-images/files/aurora-vkb-assemble.py
++++ b/meta-aurora/recipes-bsp/aurora-boot-images/files/aurora-vkb-assemble.py
+@@ -67,24 +67,50 @@
+                 sys.exit(f"manifest:{lineno}: src tag must be 'k' or 'tp', got {src!r}")
+             yield ("module", (name, src))
+ 
+ 
+-# Find the module_layout symbol's CRC inside a .ko. The kernel writes CRC32s as
+-# little-endian u32 immediately before each __ksymtab_strings entry; finding
+-# "module_layout\0" in the strings and reading back 8 bytes (CRC + alignment
+-# pad on some kernels, but the CRC is the low u32) matches what reassemble.sh's
+-# KMI gate does.
+-MOD_LAYOUT_SYM = b"module_layout\x00"
+-
+-
+-def module_layout_crc(ko_path):
+-    data = Path(ko_path).read_bytes()
+-    m = re.search(MOD_LAYOUT_SYM, data)
+-    if not m or m.start() < 8:
+-        return None
+-    # 8 bytes before the symbol string contains the CRC (u32 little-endian)
+-    # followed by padding. Low u32 is the CRC.
+-    return struct.unpack("<I", data[m.start() - 8:m.start() - 4])[0]
++# Only accept module_layout from the ELF64 little-endian __versions section.
++# Searching arbitrary module_layout strings in .strtab gives bogus CRCs.
++
++def module_layout_crc(ko_path):
++    """Return the real module_layout CRC, or None for unversioned/invalid ELF."""
++    data = Path(ko_path).read_bytes()
++    if len(data) < 64 or data[:4] != b'\x7fELF' or data[4:6] != b'\x02\x01':
++        return None
++    try:
++        shoff = struct.unpack_from('<Q', data, 40)[0]
++        shentsize, shnum, shstrndx = struct.unpack_from('<HHH', data, 58)
++        if shentsize < 64 or not shnum or shstrndx >= shnum:
++            return None
++
++        def sec(index):
++            pos = shoff + index * shentsize
++            return struct.unpack_from('<IIQQQQIIQQ', data, pos)
++
++        shstr = sec(shstrndx)
++        str_off, str_size = shstr[4:6]
++        if str_off + str_size > len(data):
++            return None
++        names = data[str_off:str_off + str_size]
++
++        for index in range(shnum):
++            sh_name, _, _, _, section_off, section_size, _, _, _, _ = sec(index)
++            if sh_name >= len(names):
++                return None
++            end = names.find(b'\x00', sh_name)
++            if end < 0 or names[sh_name:end] != b'__versions':
++                continue
++            # struct modversion_info: unsigned long crc + char name[56].
++            if section_size % 64 or section_off + section_size > len(data):
++                return None
++            for pos in range(section_off, section_off + section_size, 64):
++                name = data[pos + 8:pos + 64].split(b'\x00', 1)[0]
++                if name == b'module_layout':
++                    return struct.unpack_from('<Q', data, pos)[0] & 0xffffffff
++            return None
++    except struct.error:
++        return None
++    return None
+ 
+ 
+ def kernel_module_layout_crc(symvers_path):
+     """Read the kernel-side module_layout CRC from Module.symvers."""
