@@ -150,6 +150,21 @@ jobs:
           grep -nF 'WL=/tmp/w' \
             asteroid/src/meta-smartwatch/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb \
             | tee logs/aurora-qcacld-patch.txt
+
+          # Apply reviewed KMI fixes only to the ephemeral CI checkout.
+          # Require the kernel's finished Module.symvers before vendor modpost,
+          # and read module_layout CRC only from ELF __versions.
+          for patch in \
+            patches/0002-aurora-require-kernel-module-symvers.patch \
+            patches/0003-aurora-read-elf-kmi-crc.patch; do
+            git -C asteroid/src/meta-smartwatch apply --check "$GITHUB_WORKSPACE/$patch"
+            git -C asteroid/src/meta-smartwatch apply "$GITHUB_WORKSPACE/$patch"
+          done
+          python3 -m py_compile \
+            asteroid/src/meta-smartwatch/meta-aurora/recipes-bsp/aurora-boot-images/files/aurora-vkb-assemble.py
+          grep -nF 'virtual/kernel:do_compile_kernelmodules' \
+            asteroid/src/meta-smartwatch/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb \
+            | tee logs/aurora-kmi-patch.txt
           cd asteroid
           set +u
           source ./prepare-build.sh aurora
