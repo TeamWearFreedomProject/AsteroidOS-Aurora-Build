@@ -1,0 +1,120 @@
+name: Aurora | deep verify boot artifact bytes
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/aurora-boot-byte-verify.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download boot artifact from successful build
+        uses: actions/download-artifact@v4
+        with:
+          name: aurora-boot-artifacts-unverified-do-not-flash
+          path: in
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 37321515736
+
+      - name: Verify hashes and Android boot v4 structures
+        run: |
+          set -euo pipefail
+          cd in
+          echo '=== Files ==='
+          stat -c '%n %s bytes' *
+          echo
+          echo '=== Declared SHA256 ==='
+          cat SHA256SUMS-aurora
+          echo
+          echo '=== Recomputed SHA256 ==='
+          sha256sum boot.img vendor_kernel_boot.img init_boot.img | tee SHA256SUMS-recomputed
+          sha256sum -c SHA256SUMS-aurora
+          diff -u SHA256SUMS-aurora SHA256SUMS-verified
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, hashlib
+
+          def align(n, a=4096):
+              return (n + a - 1) // a * a
+
+          def u32(b, o): return struct.unpack_from('<I', b, o)[0]
+          def u64(b, o): return struct.unpack_from('<Q', b, o)[0]
+
+          def verify_boot(name, want_kernel):
+              b = Path(name).read_bytes()
+              assert b[:8] == b'ANDROID!', (name, b[:8])
+              kernel_size = u32(b, 8)
+              ramdisk_size = u32(b, 12)
+              os_version = u32(b, 16)
+              header_size = u32(b, 20)
+              header_version = u32(b, 40)
+              sig_size = u32(b, 1580)
+              assert header_version == 4, (name, header_version)
+              assert header_size == 1584, (name, header_size)
+              assert len(b) >= 4096
+              if want_kernel:
+                  assert kernel_size > 0 and ramdisk_size == 0, (kernel_size, ramdisk_size)
+                  koff = 4096
+                  assert koff + kernel_size <= len(b)
+                  # AArch64 Linux Image magic 0x644d5241 ("ARMd") at +0x38.
+                  kmagic = b[koff+0x38:koff+0x3c]
+                  assert kmagic == b'ARMd', (name, kmagic)
+                  print(f'{name}: v4 OK kernel={kernel_size} ramdisk=0 sig={sig_size} os_version=0x{os_version:08x} ARM64_magic=OK')
+              else:
+                  assert kernel_size == 0 and ramdisk_size > 0, (kernel_size, ramdisk_size)
+                  roff = 4096
+                  assert roff + ramdisk_size <= len(b)
+                  rmagic = b[roff:roff+4]
+                  assert rmagic == bytes.fromhex('02214c18'), (name, rmagic.hex())
+                  print(f'{name}: v4 OK kernel=0 ramdisk={ramdisk_size} sig={sig_size} os_version=0x{os_version:08x} lz4_legacy_magic=OK')
+
+          def verify_vendor(name):
+              b = Path(name).read_bytes()
+              assert b[:8] == b'VNDRBOOT', b[:8]
+              hv = u32(b, 8)
+              page = u32(b, 12)
+              vendor_ramdisk_size = u32(b, 24)
+              header_size = u32(b, 2096)
+              dtb_size = u32(b, 2100)
+              dtb_addr = u64(b, 2104)
+              table_size = u32(b, 2112)
+              table_num = u32(b, 2116)
+              table_ent = u32(b, 2120)
+              bootconfig_size = u32(b, 2124)
+              assert hv == 4, hv
+              assert page == 4096, page
+              assert header_size == 2128, header_size
+              assert vendor_ramdisk_size > 0
+              assert dtb_size > 0
+              ramdisk_off = page
+              dtb_off = align(ramdisk_off + vendor_ramdisk_size, page)
+              assert dtb_off + dtb_size <= len(b)
+              rmagic = b[ramdisk_off:ramdisk_off+4]
+              dmagic = b[dtb_off:dtb_off+4]
+              assert rmagic == bytes.fromhex('02214c18'), rmagic.hex()
+              assert dmagic == bytes.fromhex('d00dfeed'), dmagic.hex()
+              print(f'{name}: v4 OK page={page} vendor_ramdisk={vendor_ramdisk_size} dtb={dtb_size} dtb_addr=0x{dtb_addr:x}')
+              print(f'  offsets: ramdisk=0x{ramdisk_off:x} dtb=0x{dtb_off:x}; lz4=OK dtb_magic=OK; table_size={table_size} entries={table_num} entry_size={table_ent} bootconfig={bootconfig_size}')
+
+          verify_boot('boot.img', True)
+          verify_boot('init_boot.img', False)
+          verify_vendor('vendor_kernel_boot.img')
+          print('DEEP_BYTE_VERIFICATION=PASS')
+          PY
+
+      - name: Upload deep verification report files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-boot-byte-verification
+          path: in/SHA256SUMS-*
+          retention-days: 7
