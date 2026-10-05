@@ -1,0 +1,25 @@
+diff --git a/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb b/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
+--- a/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
++++ b/meta-aurora/recipes-kernel/linux/linux-aurora-modules_5.15.144.bb
+@@ -337,9 +337,20 @@
+       *) echo "" ;;
+     esac
+ }
+ 
+-do_compile() {
++# External module modpost must use the kernel's completed Module.symvers.
++# do_shared_workdir alone runs before do_compile_kernelmodules writes it.
++do_compile[depends] += "virtual/kernel:do_compile_kernelmodules"
++
++do_compile() {
++    if [ ! -s "${KOUT}/Module.symvers" ]; then
++        bbfatal "Kernel Module.symvers missing at ${KOUT}/Module.symvers; refusing modules with no KMI versions"
++    fi
++    if ! awk '$2 == "module_layout" { found=1 } END { exit !found }' "${KOUT}/Module.symvers"; then
++        bbfatal "Kernel Module.symvers lacks module_layout; refusing unversioned vendor modules"
++    fi
++
+     # qcacld (wifi) is enormous; its wlan.mod rule expands thousands of object
+     # paths into one argv -> "Argument list too long". Raise the stack limit
+     # (ARG_MAX scales with it) — the standard qcacld out-of-tree build fix.
+     ulimit -s unlimited 2>/dev/null || ulimit -s 131072 2>/dev/null || true
