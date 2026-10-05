@@ -1,0 +1,185 @@
+name: Aurora | verify Run 6 artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/aurora-verify-run6.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout verifier repository
+        uses: actions/checkout@v4
+
+      - name: Download exact Run 6 image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aurora-image-build-unverified-do-not-flash
+          path: run6-output
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 37273668183
+
+      - name: Download exact Run 6 diagnostics
+        uses: actions/download-artifact@v4
+        with:
+          name: aurora-image-build-logs
+          path: run6-logs
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 37273668183
+
+      - name: Install read-only filesystem inspection tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends e2fsprogs file
+
+      - name: Verify exact Run 6 outputs
+        id: verify
+        run: |
+          set -uo pipefail
+          mkdir -p verify-report
+          fail=0
+
+          echo "Aurora Run 6 verification" | tee verify-report/summary.txt
+          echo "source_run=37273668183" | tee -a verify-report/summary.txt
+          date -u | tee -a verify-report/summary.txt
+
+          find run6-output -type f -printf '%P %s bytes\n' | sort | tee verify-report/artifact-files.txt
+          find run6-output -type f -exec sha256sum {} + | sort | tee verify-report/SHA256SUMS.txt
+
+          mapfile -t roots < <(find run6-output -type f -name 'asteroid-image-*.ext4')
+          if [ "${#roots[@]}" -ne 1 ]; then
+            echo "FAIL: expected exactly one ext4 rootfs, found ${#roots[@]}" | tee -a verify-report/summary.txt
+            fail=1
+          else
+            rootfs="${roots[0]}"
+            bytes="$(stat -c%s "$rootfs")"
+            echo "rootfs=$rootfs" | tee -a verify-report/summary.txt
+            echo "rootfs_bytes=$bytes" | tee -a verify-report/summary.txt
+            file "$rootfs" | tee verify-report/rootfs-file.txt
+
+            magic="$(dd if="$rootfs" bs=1 skip=$((1024+56)) count=2 status=none | od -An -tx1 | tr -d ' \n')"
+            echo "ext_superblock_magic=$magic" | tee -a verify-report/summary.txt
+            if [ "$magic" != "53ef" ]; then
+              echo "FAIL: ext filesystem superblock magic is not 53ef" | tee -a verify-report/summary.txt
+              fail=1
+            fi
+
+            set +e
+            e2fsck -fn "$rootfs" > verify-report/e2fsck.txt 2>&1
+            fsck_rc=$?
+            set -e
+            echo "e2fsck_rc=$fsck_rc" | tee -a verify-report/summary.txt
+            if [ "$fsck_rc" -ne 0 ]; then
+              echo "FAIL: read-only e2fsck reported a problem" | tee -a verify-report/summary.txt
+              fail=1
+            fi
+
+            dumpe2fs -h "$rootfs" > verify-report/dumpe2fs-header.txt 2>&1 || fail=1
+
+            for p in / /sbin/init /usr /etc; do
+              set +e
+              debugfs -R "stat $p" "$rootfs" > "verify-report/debugfs-$(echo "$p" | tr '/' '_' | sed 's/^_*$//;s/^$/root/')".txt 2>&1
+              rc=$?
+              set -e
+              if [ "$rc" -ne 0 ] || grep -qi 'File not found' "verify-report/debugfs-$(echo "$p" | tr '/' '_' | sed 's/^_*$//;s/^$/root/')".txt; then
+                echo "FAIL: rootfs path missing: $p" | tee -a verify-report/summary.txt
+                fail=1
+              else
+                echo "OK: rootfs path $p" | tee -a verify-report/summary.txt
+              fi
+            done
+          fi
+
+          mapfile -t manifests < <(find run6-output -type f -name 'asteroid-image-*.manifest')
+          if [ "${#manifests[@]}" -ne 1 ]; then
+            echo "FAIL: expected exactly one manifest, found ${#manifests[@]}" | tee -a verify-report/summary.txt
+            fail=1
+          else
+            manifest="${manifests[0]}"
+            nonempty="$(grep -cve '^$' "$manifest" || true)"
+            echo "manifest_nonempty_lines=$nonempty" | tee -a verify-report/summary.txt
+            head -30 "$manifest" > verify-report/manifest-head.txt
+            if [ "$nonempty" -lt 100 ]; then
+              echo "FAIL: manifest unexpectedly small" | tee -a verify-report/summary.txt
+              fail=1
+            fi
+          fi
+
+          imglist="$(find run6-logs -type f -name image-files.txt | head -1)"
+          if [ -z "$imglist" ]; then
+            echo "FAIL: image-files.txt missing from Run 6 diagnostics" | tee -a verify-report/summary.txt
+            fail=1
+          else
+            cp "$imglist" verify-report/image-files.txt
+            check_cap() {
+              name="$1"; cap="$2"
+              sz="$(awk -v n="$name" '$1 == n {print $2; exit}' "$imglist")"
+              if [ -z "$sz" ]; then
+                echo "FAIL: $name not recorded in deploy output" | tee -a verify-report/summary.txt
+                fail=1
+              elif [ "$sz" -gt "$cap" ]; then
+                echo "FAIL: $name size $sz exceeds cap $cap" | tee -a verify-report/summary.txt
+                fail=1
+              else
+                echo "OK: $name size=$sz cap=$cap" | tee -a verify-report/summary.txt
+              fi
+            }
+            check_cap boot.img 67108864
+            check_cap vendor_kernel_boot.img 67108864
+            check_cap init_boot.img 8388608
+
+            if [ "${#roots[@]}" -eq 1 ]; then
+              built_root="$(awk '$1 ~ /^asteroid-image-.*\.ext4$/ {print $2; exit}' "$imglist")"
+              actual_root="$(stat -c%s "${roots[0]}")"
+              echo "recorded_rootfs_bytes=$built_root" | tee -a verify-report/summary.txt
+              if [ -z "$built_root" ] || [ "$built_root" != "$actual_root" ]; then
+                echo "FAIL: artifact rootfs size differs from Run 6 deploy record" | tee -a verify-report/summary.txt
+                fail=1
+              else
+                echo "OK: artifact rootfs size matches deploy record" | tee -a verify-report/summary.txt
+              fi
+            fi
+          fi
+
+          grep -R -E 'KMI gate PASSED|kernel module_layout CRC|KMI FAIL|ABORT: KMI' run6-logs             > verify-report/kmi-lines.txt 2>/dev/null || true
+
+          if grep -R -q -E 'KMI FAIL|ABORT: KMI' run6-logs; then
+            echo "FAIL: KMI failure marker found in captured Run 6 logs" | tee -a verify-report/summary.txt
+            fail=1
+          else
+            echo "OK: no KMI failure marker in captured Run 6 logs" | tee -a verify-report/summary.txt
+          fi
+
+          if grep -R -q 'Tasks Summary: Attempted 8728 tasks.*all succeeded' run6-logs; then
+            echo "OK: BitBake reported all 8728 tasks succeeded" | tee -a verify-report/summary.txt
+          else
+            echo "WARN: all-succeeded summary not found inside diagnostics artifact" | tee -a verify-report/summary.txt
+          fi
+
+          if grep -R -q 'aurora-boot-images-1.0-r0: task do_compile: Succeeded' run6-logs; then
+            echo "OK: aurora-boot-images do_compile succeeded" | tee -a verify-report/summary.txt
+          else
+            echo "WARN: aurora-boot-images success line not found inside diagnostics artifact" | tee -a verify-report/summary.txt
+          fi
+
+          echo "verification_fail=$fail" | tee -a verify-report/summary.txt
+          exit "$fail"
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-run6-verification-report
+          path: verify-report/
+          retention-days: 7
+          if-no-files-found: error
