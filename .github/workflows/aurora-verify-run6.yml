@@ -75,11 +75,18 @@ jobs:
             fi
 
             set +e
-            e2fsck -fn "$rootfs" > verify-report/e2fsck.txt 2>&1
-            fsck_rc=$?
+            e2fsck -n "$rootfs" > verify-report/e2fsck-n.txt 2>&1
+            fsck_n_rc=$?
+            e2fsck -fn "$rootfs" > verify-report/e2fsck-fn.txt 2>&1
+            fsck_fn_rc=$?
             set -e
-            echo "e2fsck_rc=$fsck_rc" | tee -a verify-report/summary.txt
-            if [ "$fsck_rc" -ne 0 ]; then
+            echo "e2fsck_n_rc=$fsck_n_rc" | tee -a verify-report/summary.txt
+            echo "e2fsck_fn_rc=$fsck_fn_rc" | tee -a verify-report/summary.txt
+            echo "===== e2fsck -n ====="
+            cat verify-report/e2fsck-n.txt
+            echo "===== e2fsck -fn ====="
+            cat verify-report/e2fsck-fn.txt
+            if [ "$fsck_n_rc" -ne 0 ] || [ "$fsck_fn_rc" -ne 0 ]; then
               echo "FAIL: read-only e2fsck reported a problem" | tee -a verify-report/summary.txt
               fail=1
             fi
