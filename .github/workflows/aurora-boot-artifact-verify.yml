@@ -1,0 +1,204 @@
+name: Aurora | rebuild and verify boot artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/aurora-boot-artifact-verify.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aurora-boot-artifact-verify
+  cancel-in-progress: false
+
+jobs:
+  build-verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 210
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Restore Stage 1 source-layer cache
+        id: layers
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/src
+          key: aurora-whinlatter-layer-sources-v1-${{ runner.os }}
+
+      - name: Restore missing source-layer checkouts
+        if: ${{ steps.layers.outputs.cache-hit != 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p logs asteroid/src/oe-core
+          clone_layer() {
+            local dest="$1" url="$2" branch="$3"
+            if [ -d "$dest/.git" ]; then return 0; fi
+            if [ -e "$dest" ]; then
+              [ -z "$(ls -A "$dest")" ] || { echo "::error::Unexpected nonempty $dest"; exit 1; }
+              rmdir "$dest"
+            fi
+            git clone --depth 1 --single-branch --branch "$branch" "$url" "$dest"
+          }
+          clone_layer asteroid/src/oe-core https://github.com/openembedded/openembedded-core.git whinlatter
+          clone_layer asteroid/src/oe-core/bitbake https://github.com/openembedded/bitbake.git 2.16
+          clone_layer asteroid/src/meta-openembedded https://github.com/openembedded/meta-openembedded.git whinlatter
+          clone_layer asteroid/src/meta-qt6 https://code.qt.io/yocto/meta-qt6.git 6.11
+          clone_layer asteroid/src/meta-smartphone https://github.com/shr-distribution/meta-smartphone.git whinlatter
+          clone_layer asteroid/src/meta-clang https://github.com/kraj/meta-clang.git whinlatter
+          clone_layer asteroid/src/meta-asteroid https://github.com/AsteroidOS/meta-asteroid.git master
+          clone_layer asteroid/src/meta-asteroid-community https://github.com/AsteroidOS/meta-asteroid-community.git master
+          clone_layer asteroid/src/meta-smartwatch https://github.com/AsteroidOS/meta-smartwatch.git master
+          clone_layer asteroid/src/meta-virtualization https://git.yoctoproject.org/meta-virtualization whinlatter
+
+      - name: Record exact layer revisions
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          {
+            for d in asteroid/src/oe-core asteroid/src/oe-core/bitbake asteroid/src/meta-openembedded asteroid/src/meta-qt6 asteroid/src/meta-smartphone asteroid/src/meta-clang asteroid/src/meta-asteroid asteroid/src/meta-asteroid-community asteroid/src/meta-smartwatch asteroid/src/meta-virtualization; do
+              printf '%s ' "$d"
+              git -C "$d" rev-parse HEAD
+            done
+          } | tee logs/layer-revisions.txt
+
+      - name: Restore downloaded Yocto sources
+        id: downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/build/downloads
+          key: aurora-boot-verify-downloads-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            aurora-image-downloads-v1-${{ runner.os }}-
+            aurora-whinlatter-downloads-v1-${{ runner.os }}
+
+      - name: Restore latest Aurora sstate checkpoint
+        id: sstate
+        uses: actions/cache/restore@v4
+        with:
+          path: asteroid/build/sstate-cache
+          key: aurora-boot-verify-sstate-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            aurora-whinlatter-sstate-v1-${{ runner.os }}-
+
+      - name: Report restored caches
+        run: |
+          set -u
+          echo "downloads matched: ${{ steps.downloads.outputs.cache-matched-key }}"
+          echo "sstate matched: ${{ steps.sstate.outputs.cache-matched-key }}"
+          du -sh asteroid/build/downloads asteroid/build/sstate-cache 2>/dev/null || true
+
+      - name: Reclaim unused runner SDKs
+        run: |
+          set -euo pipefail
+          for dir in /usr/local/lib/android /usr/share/dotnet /usr/local/share/powershell /usr/share/swift /opt/ghc /usr/local/.ghcup; do
+            if [ -d "$dir" ] && [ ! -L "$dir" ]; then sudo rm -rf -- "$dir"; fi
+          done
+          df -h .
+
+      - name: Install host tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git wget ca-certificates build-essential gawk diffstat chrpath cpio texinfo \
+            zstd lz4 xz-utils unzip file rsync bc bison flex libssl-dev \
+            python3-git python3-jinja2 python3-pexpect python3-pip
+
+      - name: Configure Aurora with reviewed patches
+        run: |
+          set -euo pipefail
+          mkdir -p logs out
+          git clone --depth 1 --single-branch --branch whinlatter \
+            https://github.com/AsteroidOS/asteroid.git asteroid-entry
+          cp asteroid-entry/prepare-build.sh asteroid/prepare-build.sh
+
+          for patch in \
+            patches/0001-aurora-qcacld-short-wlan-include-paths.patch \
+            patches/0002-aurora-require-kernel-module-symvers.patch \
+            patches/0003-aurora-read-elf-kmi-crc.patch; do
+            git -C asteroid/src/meta-smartwatch apply --check "$GITHUB_WORKSPACE/$patch"
+            git -C asteroid/src/meta-smartwatch apply "$GITHUB_WORKSPACE/$patch"
+          done
+          python3 -m py_compile \
+            asteroid/src/meta-smartwatch/meta-aurora/recipes-bsp/aurora-boot-images/files/aurora-vkb-assemble.py
+
+          cd asteroid
+          set +u
+          source ./prepare-build.sh aurora
+          set -u
+          test "$MACHINE" = aurora
+          cat >> conf/local.conf <<'LOCALCONF'
+
+          BB_NUMBER_THREADS = "3"
+          PARALLEL_MAKE = "-j 3"
+          INHERIT += "rm_work"
+          BB_DISKMON_DIRS = "HALT,${TMPDIR},8G,100K HALT,${DL_DIR},8G,100K"
+          LOCALCONF
+          cp conf/local.conf "$GITHUB_WORKSPACE/logs/local.conf"
+
+      - name: Build Aurora boot artifacts only
+        id: build
+        run: |
+          set -eo pipefail
+          cd asteroid
+          set +u
+          source ./prepare-build.sh aurora > /dev/null
+          set -u
+          echo "Building aurora-boot-images only; NO flashing"
+          timeout --signal=INT --kill-after=120s 180m \
+            bitbake aurora-boot-images 2>&1 | tee "$GITHUB_WORKSPACE/logs/build-console.log"
+
+      - name: Collect and verify boot artifacts
+        run: |
+          set -euo pipefail
+          image_dir=asteroid/build/tmp/deploy/images/aurora
+          for f in boot.img vendor_kernel_boot.img init_boot.img SHA256SUMS-aurora; do
+            test -s "$image_dir/$f"
+            cp "$image_dir/$f" out/
+          done
+
+          (
+            cd out
+            sha256sum -c SHA256SUMS-aurora
+            sha256sum boot.img vendor_kernel_boot.img init_boot.img > SHA256SUMS-verified
+          ) | tee logs/hash-verification.txt
+
+          python3 - <<'PY' | tee logs/header-smoke-test.txt
+          from pathlib import Path
+          checks = {
+              "boot.img": b"ANDROID!",
+              "init_boot.img": b"ANDROID!",
+              "vendor_kernel_boot.img": b"VNDRBOOT",
+          }
+          for name, magic in checks.items():
+              p = Path("out") / name
+              data = p.read_bytes()[:64]
+              if not data.startswith(magic):
+                  raise SystemExit(f"{name}: bad magic {data[:8]!r}")
+              print(f"{name}: magic OK, size={p.stat().st_size}")
+          PY
+
+          stat -c '%n %s bytes' out/* | tee logs/output-sizes.txt
+
+      - name: Upload boot artifacts for offline verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-boot-artifacts-unverified-do-not-flash
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload verification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-boot-artifact-verification-logs
+          path: logs/
+          retention-days: 7
+          if-no-files-found: warn
