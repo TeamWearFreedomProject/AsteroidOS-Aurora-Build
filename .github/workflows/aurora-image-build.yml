@@ -287,10 +287,13 @@ jobs:
           if [ -d asteroid/build/sstate-cache ]; then
             ss_bytes="$(du -sb asteroid/build/sstate-cache | awk '{print $1}')"
             echo "Yocto sstate bytes: $ss_bytes"
-            if [ "$ss_bytes" -gt 0 ] && [ "$ss_bytes" -le 4294967296 ]; then
+            # Keep one substantial Yocto checkpoint. GitHub's default repository
+            # cache budget is 10 GiB; leave headroom for cache metadata/other small
+            # entries and let normal cache eviction discard older checkpoints.
+            if [ "$ss_bytes" -gt 0 ] && [ "$ss_bytes" -le 8589934592 ]; then
               echo "sstate_ok=true" >> "$GITHUB_OUTPUT"
             else
-              echo "::warning::Sstate directory empty or exceeds 4 GiB: skip caching."
+              echo "::warning::Sstate directory empty or exceeds 8 GiB: skip caching."
             fi
           fi
 
