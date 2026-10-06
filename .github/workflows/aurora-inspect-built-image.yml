@@ -1,0 +1,77 @@
+name: Aurora | inspect existing rootfs (no rebuild, no flash)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/aurora-inspect-built-image.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    name: Check the verified Run 6 ext4 offline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download existing image artifact (NO BitBake)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifact report
+          gh run download 37273668183 \
+            --repo "$GH_REPO" \
+            --name aurora-image-build-unverified-do-not-flash \
+            --dir artifact
+          find artifact -type f -printf '%p %s bytes\n' | tee report/artifact-files.txt
+
+      - name: Confirm exact rootfs bytes and inspect scripts READ ONLY
+        run: |
+          set -euo pipefail
+          rootfs="$(find artifact -type f -name 'asteroid-image-aurora.rootfs-20261005064926.ext4' -print -quit)"
+          if [ -z "$rootfs" ]; then
+            echo 'Exact Run 6 rootfs missing' >&2
+            exit 1
+          fi
+          expected='a4b1689a01e8158dd65e748c0f13a632253d2b040bc5cda912210ce3c1bda6ef'
+          actual="$(sha256sum "$rootfs" | cut -d' ' -f1)"
+          printf 'expected=%s\nactual=%s\n' "$expected" "$actual" | tee report/integrity.txt
+          test "$actual" = "$expected"
+          debugfs -V > report/debugfs-version.txt 2>&1 || true
+          for name in \
+            /usr/libexec/aurora-vendor-mount.sh \
+            /usr/lib/aurora-vendor-mount.sh \
+            /lib/systemd/system/aurora-vendor-mount.service \
+            /usr/lib/systemd/system/aurora-vendor-mount.service \
+            /etc/fstab \
+            /etc/os-release; do
+            safe="$(printf '%s' "$name" | sed 's,/,_,g')"
+            echo "READING $name"
+            debugfs -R "stat $name" "$rootfs" > "report/${safe}.stat.txt" 2>&1 || true
+            debugfs -R "cat $name" "$rootfs" > "report/${safe}.txt" 2>&1 || true
+          done
+          for d in /usr/libexec /etc/systemd/system /usr/lib/systemd/system /var/lib/lxc/android; do
+            safe="$(printf '%s' "$d" | sed 's,/,_,g')"
+            debugfs -R "ls -l $d" "$rootfs" > "report/dir${safe}.txt" 2>&1 || true
+          done
+          {
+            echo "NO FLASH. NO REBUILD. Original image SHA256 verified."
+            echo "Selected script excerpt:"
+            if [ -f report/_usr_libexec_aurora-vendor-mount.sh.txt ]; then
+              grep -E 'SUPER=|dm_create|system_b|vendor_b|vendor_dlkm_b|system_dlkm_b' \
+                report/_usr_libexec_aurora-vendor-mount.sh.txt || true
+            fi
+          } | tee report/SUMMARY.txt
+
+      - name: Upload inspection report only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-run6-rootfs-offline-inspection
+          path: report/
+          if-no-files-found: warn
+          retention-days: 7
