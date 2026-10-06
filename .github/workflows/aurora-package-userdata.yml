@@ -1,0 +1,82 @@
+name: Aurora | package existing rootfs into userdata (no rebuild)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/aurora-package-userdata.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    name: Package verified Run 6 rootfs for initramfs sdcard lookup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Install sparse image tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs
+
+      - name: Download previously validated rootfs (NO BitBake)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifact out staging
+          gh run download 37273668183 \
+            --repo "$GH_REPO" \
+            --name aurora-image-build-unverified-do-not-flash \
+            --dir artifact
+          rootfs="$(find artifact -type f -name 'asteroid-image-aurora.rootfs-20261005064926.ext4' -print -quit)"
+          test -n "$rootfs"
+          printf '%s  %s\n' a4b1689a01e8158dd65e748c0f13a632253d2b040bc5cda912210ce3c1bda6ef "$rootfs" | sha256sum -c -
+          cp "$rootfs" staging/asteroidos.ext4
+          echo "Verified: original AsteroidOS ext4 stored as /asteroidos.ext4 in staging directory."
+
+      - name: Create independent 2GiB ext4 userdata filesystem WITHOUT flashing
+        run: |
+          set -euo pipefail
+          image=out/aurora-asteroidos-userdata-2GiB.raw.img
+          truncate -s 2147483648 "$image"
+          # Avoid ext4 orphan_file and modern checksum features that may be
+          # unsupported by the older BusyBox/e2fsck in Aurora initramfs.
+          mkfs.ext4 -q -F -L ASTEROID_DATA -m 0 \
+            -O ^64bit,^metadata_csum,^orphan_file \
+            -E lazy_itable_init=0,lazy_journal_init=0 \
+            -d staging "$image"
+          e2fsck -fn "$image" > out/e2fsck-userdata.txt 2>&1
+          debugfs -R 'stat /asteroidos.ext4' "$image" > out/asteroidos-file-stat.txt 2>&1
+          grep -q 'Size: 1441935360' out/asteroidos-file-stat.txt
+          # Android sparse format saves USB transfer of unwritten free blocks.
+          img2simg "$image" out/aurora-asteroidos-userdata-2GiB-sparse.img
+          sha256sum out/*img > out/SHA256SUMS-userdata.txt
+          cat > out/README-FIRST.txt <<'README'
+          EXPERIMENTAL: NOT BOOT VALIDATED. NO WATCH WAS FLASHED BY THIS JOB.
+          This is an ext4 filesystem for the Pixel Watch 2 userdata partition.
+          Contains the verified 2026-10-05 AsteroidOS image as /asteroidos.ext4.
+          Aurora's current initramfs init.sh checks /sdcard/asteroidos.ext4
+          with sdcard_partition=mmcblk0p82 before switching to rootfs.
+          Flashing this image to 'userdata' WILL ERASE current userdata!
+          Neither vendor_b fixed offsets nor the actual device boot are verified.
+          Do not write to super or vendor_b based only on this package.
+          README
+          ls -lh out/*
+
+      - name: Upload sparse userdata image plus integrity report (NO flash)
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-userdata-rootfs-EXPERIMENTAL-erases-userdata
+          path: |
+            out/aurora-asteroidos-userdata-2GiB-sparse.img
+            out/SHA256SUMS-userdata.txt
+            out/README-FIRST.txt
+            out/e2fsck-userdata.txt
+            out/asteroidos-file-stat.txt
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 7
